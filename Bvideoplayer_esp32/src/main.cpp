@@ -5,16 +5,26 @@
 #include <TFT_eSPI.h>
 #include "../include/config.h"
 
-
 // 硬件定义
-#define BTN_UP   12
-#define BTN_OK   13
-#define BTN_DOWN 14
+#define BTN_PIN 12  // 按钮引脚
+#define DEBOUNCE_TIME 200  // 消抖时间（毫秒）
+#define LONG_PRESS_TIME 1000  // 长按时间（毫秒）
+#define DOUBLE_CLICK_TIME 300  // 连按间隔时间（毫秒）
 
 // 全局对象
 TFT_eSPI tft;
 int currentSelection = 0;
 std::vector<String> videoTitles;
+bool isLoggedIn = false;  // 登录状态
+String authToken;  // 认证令牌
+
+// 按钮状态变量
+bool buttonState = HIGH;
+bool lastButtonState = HIGH;
+unsigned long lastDebounceTime = 0;
+unsigned long lastPressTime = 0;
+unsigned long lastClickTime = 0;
+int clickCount = 0;
 
 // 初始化WiFi
 void connectWiFi() {
@@ -22,7 +32,7 @@ void connectWiFi() {
   tft.drawString("Connecting WiFi...", 10, 150);
   while (WiFi.status() != WL_CONNECTED) {
     delay(500);
-    tft.drawString(".", 200 + (WiFi.status() % 3)*10, 150);
+    tft.drawString(".", 200 + (WiFi.status() % 3) * 10, 150);
   }
   tft.fillScreen(TFT_BLACK);
 }
@@ -35,7 +45,7 @@ void fetchPopularVideos() {
     DynamicJsonDocument doc(2048);  // 优化内存占用
     deserializeJson(doc, http.getString());
     JsonArray list = doc["data"]["list"];
-    
+
     videoTitles.clear();
     for (JsonObject item : list) {
       String title = item["title"].as<String>();
@@ -51,37 +61,81 @@ void fetchPopularVideos() {
 void drawVideoList() {
   tft.fillScreen(TFT_BLACK);
   tft.setTextColor(TFT_WHITE, TFT_BLACK);
-  
-  for (int i=0; i<videoTitles.size(); i++) {
+
+  for (int i = 0; i < videoTitles.size(); i++) {
     if (i == currentSelection) {
-      tft.fillRect(0, i*30, 240, 30, TFT_BLUE);
+      tft.fillRect(0, i * 30, 240, 30, TFT_BLUE);
       tft.setTextColor(TFT_WHITE, TFT_BLUE);
     } else {
       tft.setTextColor(TFT_WHITE, TFT_BLACK);
     }
-    tft.drawString(videoTitles[i], 5, 5 + i*30);
+    tft.drawString(videoTitles[i], 5, 5 + i * 30);
   }
+}
+
+// 显示登录界面
+void showLoginScreen() {
+  tft.fillScreen(TFT_BLACK);
+  tft.drawString("Press button to login Bilibili", 10, 150);
+}
+
+// 登录 B 站（模拟）
+void loginBilibili() {
+  // 这里只是模拟登录过程，实际需要实现 OAuth 2.0 流程
+  // 可以参考 B 站开放平台文档实现登录逻辑
+  isLoggedIn = true;
+  authToken = "simulated_token";  // 模拟认证令牌
+  tft.fillScreen(TFT_BLACK);
+  tft.drawString("Logged in successfully", 10, 150);
+  delay(2000);
+  fetchPopularVideos();
+  drawVideoList();
 }
 
 // 按钮检测
 void checkButtons() {
-  static unsigned long lastPress = 0;
-  if (millis() - lastPress < 200) return;  // 防抖
-  
-  if (digitalRead(BTN_UP) == LOW) {
-    currentSelection = (currentSelection - 1 + videoTitles.size()) % videoTitles.size();
-    drawVideoList();
-    lastPress = millis();
-  } else if (digitalRead(BTN_DOWN) == LOW) {
-    currentSelection = (currentSelection + 1) % videoTitles.size();
-    drawVideoList();
-    lastPress = millis();
-  } else if (digitalRead(BTN_OK) == LOW) {
-    // 可扩展播放功能
-    tft.fillScreen(TFT_BLACK);
-    tft.drawString("Selected: " + videoTitles[currentSelection], 10, 140);
-    lastPress = millis();
+  bool reading = digitalRead(BTN_PIN);
+
+  if (reading != lastButtonState) {
+    lastDebounceTime = millis();
   }
+
+  if ((millis() - lastDebounceTime) > DEBOUNCE_TIME) {
+    if (reading != buttonState) {
+      buttonState = reading;
+
+      if (buttonState == LOW) {  // 按钮按下
+        lastPressTime = millis();
+        clickCount++;
+        if (clickCount == 1) {
+          lastClickTime = millis();
+        }
+      } else {  // 按钮释放
+        unsigned long pressDuration = millis() - lastPressTime;
+        if (pressDuration >= LONG_PRESS_TIME) {  // 长按
+          if (!isLoggedIn) {
+            showLoginScreen();
+          }
+        } else {  // 短按
+          if (clickCount == 2 && (millis() - lastClickTime) <= DOUBLE_CLICK_TIME) {  // 连按
+            if (isLoggedIn) {
+              // 可扩展播放功能
+              tft.fillScreen(TFT_BLACK);
+              tft.drawString("Selected: " + videoTitles[currentSelection], 10, 140);
+            }
+            clickCount = 0;
+          } else {  // 单按
+            if (isLoggedIn) {
+              currentSelection = (currentSelection + 1) % videoTitles.size();
+              drawVideoList();
+            }
+          }
+        }
+      }
+    }
+  }
+
+  lastButtonState = reading;
 }
 
 void setup() {
@@ -90,18 +144,20 @@ void setup() {
   tft.init();
   tft.setRotation(1);
   tft.fillScreen(TFT_BLACK);
-  
+
   // 初始化按钮
-  pinMode(BTN_UP, INPUT_PULLUP);
-  pinMode(BTN_OK, INPUT_PULLUP);
-  pinMode(BTN_DOWN, INPUT_PULLUP);
+  pinMode(BTN_PIN, INPUT_PULLUP);
 
   // 连接网络
   connectWiFi();
-  
-  // 首次加载数据
-  fetchPopularVideos();
-  drawVideoList();
+
+  if (isLoggedIn) {
+    // 首次加载数据
+    fetchPopularVideos();
+    drawVideoList();
+  } else {
+    showLoginScreen();
+  }
 }
 
 void loop() {
